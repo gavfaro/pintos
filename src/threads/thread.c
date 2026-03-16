@@ -196,6 +196,7 @@ tid_t thread_create(const char *name, int priority,
   /* Add to run queue. */
   thread_unblock(t);
 
+  // Yield immidently in case the new thread in question has a higher priorty
   if (priority > thread_current()->priority)
     thread_yield();
 
@@ -233,6 +234,7 @@ void thread_unblock(struct thread *t)
 
   old_level = intr_disable();
   ASSERT(t->status == THREAD_BLOCKED);
+  // Gotta ensure that highest priotty list thread is always at front
   list_insert_ordered(&ready_list, &t->elem, thread_compare_priority, NULL);
   t->status = THREAD_READY;
   intr_set_level(old_level);
@@ -301,6 +303,7 @@ void thread_yield(void)
 
   old_level = intr_disable();
   if (cur != idle_thread)
+    // Reinserting in prirorty order since we might have donated to someone and now have higher priority than before
     list_insert_ordered(&ready_list, &cur->elem, thread_compare_priority, NULL);
   cur->status = THREAD_READY;
   schedule();
@@ -327,15 +330,15 @@ void thread_foreach(thread_action_func *func, void *aux)
 void thread_set_priority(int new_priority)
 {
   struct thread *t = thread_current();
-  t->base_priority = new_priority; /* Save new base priority */
-  thread_update_priority(t);       /* Recalculate effective priority */
-  thread_yield_if_not_highest();   /* Yield if someone else is now higher */
+  t->base_priority = new_priority; // Save the new base priority
+  thread_update_priority(t);       // Gotta recalc that effective priroty
+  thread_yield_if_not_highest();   // If someone else turns out to be higher, just yield
 }
 
 /** Returns the current thread's priority. */
 int thread_get_priority(void)
 {
-  return thread_current()->priority; /* priority field always holds effective value */
+  return thread_current()->priority; // Effective value always maintained and held in the priority field.
 }
 
 /** Sets the current thread's nice value to NICE. */
@@ -457,12 +460,13 @@ init_thread(struct thread *t, const char *name, int priority)
   list_push_back(&all_list, &t->allelem);
   intr_set_level(old_level);
 
+  // Fields to initilaize alarm clock & priority donation
   t->wakeup_tick = 0;
 
   /* Initialize priority donation fields */
-  t->base_priority = priority; /* Save original priority */
-  t->waiting_lock = NULL;      /* Not waiting on any lock yet */
-  list_init(&t->donors);       /* Empty donor list */
+  t->base_priority = priority; // Gotta save the origional priorty
+  t->waiting_lock = NULL;      // Not waiting on a lock yet rn
+  list_init(&t->donors);       // Just an empty donor list
 }
 
 /** Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -578,16 +582,11 @@ allocate_tid(void)
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
 
-/* ──────────────────────────────────────────────────────────────
-   PRIORITY COMPARISON HELPERS
-   ────────────────────────────────────────────────────────────── */
-
-/* Comparator for the ready_list and semaphore waiter lists.
-   Returns true if thread A has strictly higher priority than thread B.
-   Used with list_insert_ordered to keep lists sorted highest-first. */
-bool thread_compare_priority(const struct list_elem *a,
-                             const struct list_elem *b,
-                             void *aux UNUSED)
+// Priorty comparison helpers:
+// This will be a comparator for the ready_list and those semaphore waiter list.
+// Basically just returns true if thread A has a noted strictly higher priority than thread B.
+// Using this with list_insert_ordered will keep lists sorted highest first.
+bool thread_compare_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
 {
   return list_entry(a, struct thread, elem)->priority > list_entry(b, struct thread, elem)->priority;
 }
@@ -596,50 +595,35 @@ bool thread_compare_priority(const struct list_elem *a,
    Returns true if donor A has strictly higher priority than donor B.
    Used to keep the donors list sorted so we can quickly find the
    highest donation. */
-bool thread_compare_donor_priority(const struct list_elem *a,
-                                   const struct list_elem *b,
-                                   void *aux UNUSED)
+bool thread_compare_donor_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
 {
   return list_entry(a, struct thread, donor_elem)->priority > list_entry(b, struct thread, donor_elem)->priority;
 }
 
-/* ──────────────────────────────────────────────────────────────
-   PRIORITY UPDATE
-   ────────────────────────────────────────────────────────────── */
-
-/* Recalculates thread T's effective priority.
-   The effective priority is the maximum of:
-     - the thread's own base_priority, and
-     - the highest priority among all current donors.
-   This must be called whenever a donation is added or removed. */
+// This will recalc thread T's effective priority based on its base priority and any active donations.
+// Should be noted that the effective priroty is the max of the threads own base priorty & the highest priorty amonst all active donors.
+// Need to call this whenever a donation is added/removed.
 void thread_update_priority(struct thread *t)
 {
-  int max_priority = t->base_priority; /* Start with our own base priority */
+  int max_priority = t->base_priority; // Starting off with our own base priority
 
-  /* If there are active donors, check if the best one beats us */
+  // Any active donors? Check if the best one beats.
   if (!list_empty(&t->donors))
   {
-    /* donors list is kept sorted highest-first, so front = best donor */
-    int donor_max = list_entry(list_front(&t->donors),
-                               struct thread, donor_elem)
-                        ->priority;
+    // Front = best donor thanks to our sorting.
+    int donor_max = list_entry(list_front(&t->donors), struct thread, donor_elem)->priority;
     if (donor_max > max_priority)
       max_priority = donor_max;
   }
 
-  t->priority = max_priority; /* Update the effective priority */
+  t->priority = max_priority; // Effective priroty gets updated
 }
 
-/* ──────────────────────────────────────────────────────────────
-   PRIORITY DONATION PROPAGATION
-   ────────────────────────────────────────────────────────────── */
-
-/* Propagates a priority donation upward through a chain of lock holders.
-   Starting from thread T (which is about to block on a lock), we walk up
-   the chain: T waits on lock L1 held by H1, H1 waits on lock L2 held by H2, etc.
-   We cap the chain depth at 8 to prevent infinite loops.
-   If a holder is sitting in the ready_list, we re-insert it at the
-   correct position so the scheduler sees the updated priority. */
+// Priority donation is  propagated upward through a chain of lock holders.
+// Starting off from thread T, walking up the chian -> T waits on lock L1, held by H1
+// H1 waits on lock L2 held by H2, etc ect ect.
+// Capped at 8 to prevent infinite loops
+//  On the chance a holder is sitting in the ready_list, we need to re-insert it at the correct position so the scheduler sees the updated priority.
 void thread_donate_priority(struct thread *t)
 {
   int depth = 0;
@@ -649,48 +633,42 @@ void thread_donate_priority(struct thread *t)
   {
     struct thread *holder = cur->waiting_lock->holder;
     if (holder == NULL)
-      break; /* Lock has no holder yet, nothing to donate to */
+      break; // Nothing to donate since lock aint got a holder yet
 
     if (holder->priority >= cur->priority)
-      break; /* Holder already has equal or higher priority, stop */
+      break; // Holder already has equal or higher priority, stop
 
     /* Boost the holder's effective priority */
     holder->priority = cur->priority;
 
-    /* If the holder is in the ready list, move it to its correct
-       position so the scheduler picks it sooner */
+    // If the holder is in the ready list, move it to its correct
+    // position so the scheduler picks it sooner
     if (holder->status == THREAD_READY)
     {
       list_remove(&holder->elem);
-      list_insert_ordered(&ready_list, &holder->elem,
-                          thread_compare_priority, NULL);
+      list_insert_ordered(&ready_list, &holder->elem, thread_compare_priority, NULL);
     }
 
-    /* Move up the chain: now check if holder is also waiting */
+    // Now check if holder is also waiting
     cur = holder;
     depth++;
   }
 }
 
-/* ──────────────────────────────────────────────────────────────
-   PREEMPTION CHECK
-   ────────────────────────────────────────────────────────────── */
+// Check wether the active thread running still has the highest priority.
+// However, if a higher priorty thread is watiing the ready list, YIELD immidently to let it run.
 
-/* Checks whether the currently running thread still has the highest
-   priority.  If a higher-priority thread is waiting in the ready list,
-   yields immediately.  Must not be called from an interrupt handler. */
 void thread_yield_if_not_highest(void)
 {
   enum intr_level old_level = intr_disable(); /* Protect ready_list access */
 
   if (!list_empty(&ready_list))
   {
-    struct thread *highest = list_entry(list_front(&ready_list),
-                                        struct thread, elem);
+    struct thread *highest = list_entry(list_front(&ready_list), struct thread, elem);
     if (highest->priority > thread_current()->priority)
     {
       intr_set_level(old_level);
-      thread_yield(); /* Give up the CPU */
+      thread_yield(); // Surrender to the CPU
       return;
     }
   }

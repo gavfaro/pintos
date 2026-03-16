@@ -123,6 +123,7 @@ void thread_start(void);
 void thread_tick(void);
 void thread_print_stats(void);
 
+// Priorty helpers
 bool thread_compare_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
 bool thread_compare_donor_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
 void thread_update_priority(struct thread *t);

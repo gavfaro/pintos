@@ -30,12 +30,12 @@ static void busy_wait(int64_t loops);
 static void real_time_sleep(int64_t num, int32_t denom);
 static void real_time_delay(int64_t num, int32_t denom);
 
-static struct list sleep_list;
+static struct list sleep_list; // Sorted list of sleeping threads, ordered by wakup_tick ascending. In this area, threads are in a THREAD_BLOCKED state.
 
+// Comparator for the sleep_list. Returns true if thread A wakes up before thread B.
+// Sorted so the soonest to wake up list is always first
 static bool
-thread_compare_wakeup(const struct list_elem *a,
-                      const struct list_elem *b,
-                      void *aux UNUSED)
+thread_compare_wakeup(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
 {
   return list_entry(a, struct thread, elem)->wakeup_tick < list_entry(b, struct thread, elem)->wakeup_tick;
 }
@@ -45,7 +45,7 @@ thread_compare_wakeup(const struct list_elem *a,
 void timer_init(void)
 {
   pit_configure_channel(0, 2, TIMER_FREQ);
-  list_init(&sleep_list);
+  list_init(&sleep_list); // Gotta initialize the sleep queue
   intr_register_ext(0x20, timer_interrupt, "8254 Timer");
 }
 
@@ -93,25 +93,24 @@ timer_elapsed(int64_t then)
   return timer_ticks() - then;
 }
 
-/** Sleeps for approximately TICKS timer ticks.  Interrupts must
-   be turned on. */
+// Sleeps for approximately TICKS timer ticks.  Interrupts must be turned on.
 void timer_sleep(int64_t ticks)
 {
-  /* Negative or zero ticks: nothing to do */
+  // Cant do anything if ticks are 0 or negative
   if (ticks <= 0)
     return;
 
   ASSERT(intr_get_level() == INTR_ON);
 
-  enum intr_level old_level = intr_disable(); /* Protect shared sleep_list */
+  enum intr_level old_level = intr_disable(); // sleep_list which is shared, gets protected
 
   struct thread *t = thread_current();
-  t->wakeup_tick = timer_ticks() + ticks; /* Compute absolute wake-up time */
+  t->wakeup_tick = timer_ticks() + ticks; // Calc the abs wake up time.
 
-  /* Insert into sleep_list in sorted order (earliest deadline first) */
+  // Insert into sleep_list in a sorted fashion. Meaning that the earliest deadline is first :)
   list_insert_ordered(&sleep_list, &t->elem, thread_compare_wakeup, NULL);
 
-  /* Block this thread — removes it from scheduler's ready pool */
+  // Blocking this thread will remove it from the scheudlers ready pool!
   thread_block();
 
   intr_set_level(old_level); /* Restore interrupt state */
@@ -188,13 +187,12 @@ timer_interrupt(struct intr_frame *args UNUSED)
   thread_tick();
   while (!list_empty(&sleep_list))
   {
-    struct thread *t = list_entry(list_front(&sleep_list),
-                                  struct thread, elem);
+    struct thread *t = list_entry(list_front(&sleep_list), struct thread, elem);
     if (t->wakeup_tick > ticks)
-      break; /* Front thread isn't due yet, no one else is either */
+      break; // If the front thread aint due yet, then no one else is either.
 
-    list_pop_front(&sleep_list); /* Remove from sleep list */
-    thread_unblock(t);           /* Move back to ready list */
+    list_pop_front(&sleep_list); // Remove from the sleep list
+    thread_unblock(t);           // Moving on back to the ready list so the scheduler can pick it up when its turn comes
   }
 }
 
